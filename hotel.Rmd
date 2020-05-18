@@ -1,0 +1,1417 @@
+---
+title: "Trivago Booking - Random Forest Classification"
+author: "Alexander Kahanek"
+date: "4/30/2020"
+output: 
+    rmdformats::readthedown:
+      code_folding: hide
+      toc_depth: 3
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    df_print: paged
+---
+
+# Abstract 
+
+The purpose of this report will be to use the Trivago Booking Data to classify hotel bookings into a possible canceled booking, or retained booking.
+
+This can be used to gain insight into how and why bookings are canceled. This can also be used as a model to gain a marketing advantage, by advertisement targeting those who are more likely to retain their bookings, or saving money by not targeting the bookings that are most likely to cancel their bookings.
+
+# Acknowledgments
+
+The data was originally created and found by Nuno Antonio, Ana Almeida, and Luis Nunes for the following paper:
+
+    https://www.sciencedirect.com/science/article/pii/S2352340918315191
+
+The data file used was gathered from a github repository ran by tidy tuesday, which was downloaded and cleaned by Thomas Mock and Antoine Bichat. This can be found here:
+
+    https://github.com/rfordatascience/tidytuesday/blob/master/data/2020/2020-02-11/readme.md
+
+```{r, echo= FALSE, warning= FALSE, message= FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+
+options(stringsAsFactors=FALSE)
+library(randomForest)
+library(caret)
+library(dplyr)
+library(tidyr)
+library(kableExtra)
+library(DT)
+library(MLeval)
+library(ggplot2)
+library(ggpubr)
+library(highcharter)
+library(plotly)
+
+# set seed for random forest
+set.seed(51)
+
+## FUNCTION FOR SPLITTING BY PERCENT CHOSEN || TRAIN / TEST
+tt.split <- function(data, .train = NULL, percent = 0.8, dups = FALSE){
+  #######################
+  # PASS IN MODELING DATA
+  #
+  ## FOR TRAIN DATA
+  ### PASS IN PERCENT || IF NOT 0.8 DEFAULT
+  #
+  ## FOR TEST DATA
+  ### PASS IN TRAIN DATA
+  #
+  ## NO DUPLICATE IS DEFAULT
+  ######################
+  
+  # randomnizing data
+  data <- data[sample(nrow(data)),]
+  
+  # resetting indicies
+  rownames(data) <- NULL
+  
+  # SPLITTING
+  if(is.null(.train)){ # get train data
+    data <- data %>% 
+      slice(1:ceiling(nrow(data)*percent)) # top X% of data
+  }
+  else if (!is.null(.train)){ # get test data
+    
+    # randomnizing train data
+    .train <- .train[sample(nrow(.train)),]
+    # resetting indicies train data
+    rownames(.train) <- NULL
+    
+    # taking training data out of model data
+    data <- data %>% 
+      anti_join(.train) 
+    
+    if (isFALSE(dups)){ # no duplicates
+      data <- data %>%
+      distinct() 
+    }
+  }
+  
+  return (data) # send back data
+}
+
+## FUNCTION TO CHECK SAMPLE DISTRIBUTION
+print.ttDist <- function(train=NULL, test=NULL, var, .md=NULL){
+  #############################
+  # PASS IN TRAIN AND TEST DATA
+  # PASS IN PREDICTION VARIABLE
+  # PASS IN MODEL DATA IF WANT TO COMPARE
+  #############################
+  
+  ## IF MODEL IS PASSED IN
+  if (!is.null(.md)){
+    
+    # grab true and false values
+    val = levels(.md[,var]) #val[1] is true / val[2] is false
+    
+    name = as.list(match.call())[-1]$.md
+    
+    # total model
+    md_t = nrow(.md)
+    # model variable = 1
+    md_v_1 = nrow(.md[.md[,var]==val[1],])
+    # model duplicates, var = 1
+    md_d_1 = md_v_1 - nrow(distinct(.md[.md[,var]==val[1],]))
+    # model variable = 0
+    md_v_0 = nrow(.md[.md[,var]==val[2],])
+    # model duplicates, var = 0
+    md_d_0 = md_v_0 - nrow(distinct(.md[.md[,var]==val[2],]))
+
+  
+  print.md <- function(.md){
+    return (paste("\n\nin",name,"data...",
+          "\n\n        total samples :", md_t,
+          "\n    ",var,"==",as.character(val[1]),":", md_v_1,
+          "\t% :",round(md_v_1/md_t*100,2),
+          "  dups :",md_d_1,
+          "\n    ",var,"==",as.character(val[2]),":", md_v_0,
+          "\t% :",round(md_v_0/md_t*100,2),
+          "  dups :",md_d_0,
+          sep= " "
+    ))
+  }
+  
+  ## IF ONLY .md DATA WAS PASSED IN, PRINT THEN EXIT
+  if (is.null(train) & is.null(test)){
+    return(cat("Checking distribution of prediction variable",print.md(.md)))
+  }
+  }
+  
+  # grab true and false values
+  val = levels(train[,var]) #val[1] is true / val[2] is false
+  
+  # total train
+  tr_t = nrow(train)
+  # train variable = 1
+  tr_v_1 = nrow(train[train[,var]==val[1],])
+  # train duplicates, var = 1
+  tr_d_1 = tr_v_1 - nrow(distinct(train[train[,var]==val[1],]))
+  # train variable = 0
+  tr_v_0 = nrow(train[train[,var]==val[2],])
+  # train duplicates, var = 0
+  tr_d_0 = tr_v_0 - nrow(distinct(train[train[,var]==val[2],]))
+  
+  # total test
+  te_t = nrow(test)
+  # test variable = 1
+  te_v_1 = nrow(test[test[,var]==val[1],])
+  # test duplicates, var = 1
+  te_d_1 = te_v_1 - nrow(distinct(test[test[,var]==val[1],]))
+  # test variable = 0
+  te_v_0 = nrow(test[test[,var]==val[2],])
+  # test duplicates, var = 0
+  te_d_0 = te_v_0 - nrow(distinct(test[test[,var]==val[2],]))
+
+  
+  #total samples
+  # all train + all test
+  tt_s = nrow(train) + nrow(test)
+  
+  # total non duplicates
+  not_d_tt = train %>% bind_rows(test) %>% distinct() %>% nrow()
+  
+  # total duplicates in train
+  # total train - non duplicates
+  d_train = nrow(train) - (train %>% distinct() %>% nrow())
+  
+  # total duplicates in test
+  # total test - non duplicates
+  d_test = nrow(test) - (test %>% distinct() %>% nrow())
+  
+  # total duplicates between train and test
+  # (total samples - non duplactes) - (train dups + test dups)
+  d_bw_tt = (tt_s-not_d_tt)-(d_train+d_test)
+  
+  # PRINT STATEMENT
+  cat("Checking distribution of prediction variable",
+      "\n\nin the training data...",
+      "\n\n        total samples :", tr_t,
+      "\n    ",var,"==",as.character(val[1]),":", tr_v_1,
+      "\t% :",round(tr_v_1/tr_t*100,2),
+      "  dups :",tr_d_1,
+      "\n    ",var,"==",as.character(val[2]),":", tr_v_0,
+      "\t% :",round(tr_v_0/tr_t*100,2),
+      "  dups :",tr_d_0,
+      "\n\nin the test data...",
+      "\n\n        total samples :", te_t,
+      "\n    ",var,"==",as.character(val[1]),":", te_v_1,
+      "\t% :",round(te_v_1/te_t*100,2),
+      "  dups :",te_d_1,
+      "\n    ",var,"==",as.character(val[2]),":", te_v_0,
+      "\t% :",round(te_v_0/te_t*100,2),
+      "  dups :",te_d_0,
+      "\n\nin train + test data...",
+      "\n\n        total samples :", tt_s,
+      "\n         dups between :",d_bw_tt,
+      ifelse(!is.null(.md),print.md(.md),"")
+  )
+}
+```
+
+# The Data
+
+Here are all the features included in the data set, and a short description of them all.
+
+```{r}
+raw <- read.csv('hotel_bookings.csv')
+
+# outputting explanation of features
+info=c("hotel", "Hotel (H1 = Resort Hotel or H2 = City Hotel)", 
+      "is_canceled", "alue indicating if the booking was canceled (1) or not (0)",
+      "lead_time", "Number of days that elapsed between the entering date of the booking into the PMS and the arrival date",
+      "arrival_date_year", "Year of arrival date",
+      "arrival_date_month", "Month of arrival date",
+      "arrival_date_week_number", "Week number of year for arrival date",
+      "arrival_date_day_of_month", "Day of arrival date",
+      "stays_in_weekend_nights", "Number of weekend nights (Saturday or Sunday) the guest stayed or booked to stay at the hotel",
+      "stays_in_week_nights", "Number of week nights (Monday to Friday) the guest stayed or booked to stay at the hotel",
+      "adults", "Number of adults",
+      "children", "Number of children.",
+      "babies", "Number of babies",
+      "meal", "ype of meal booked. Categories are presented in standard hospitality meal packages: Undefined/SC – no meal package; BB – Bed & Breakfast; HB – Half board (breakfast and one other meal – usually dinner); FB – Full board (breakfast, lunch and dinner)",
+      "country", "Country of origin. Categories are represented in the ISO 3155–3:2013 format",
+      "market_segment", "Market segment designation. In categories, the term “TA” means “Travel Agents” and “TO” means “Tour Operators”",
+      "distribution_channel", "Booking distribution channel. The term “TA” means “Travel Agents” and “TO” means “Tour Operators”",
+      "is_repeated_guest", "Value indicating if the booking name was from a repeated guest (1) or not (0)",
+      "previous_bookings_not_canceled", "Number of previous bookings not cancelled by the customer prior to the current booking",
+      "reserved_room_type", "Code of room type reserved. Code is presented instead of designation for anonymity reasons.",
+      "assigned_room_type", "Code for the type of room assigned to the booking. Sometimes the assigned room type differs from the reserved room type due to hotel operation reasons (e.g. overbooking) or by customer request. Code is presented instead of designation for anonymity reasons.",
+      "booking_changes", "Number of changes/amendments made to the booking from the moment the booking was entered on the PMS until the moment of check-in or cancellation",
+      "deposit_type", "Indication on if the customer made a deposit to guarantee the booking. This variable can assume three categories: No Deposit – no deposit was made; Non Refund – a deposit was made in the value of the total stay cost; Refundable – a deposit was made with a value under the total cost of stay.",
+      "agent", "ID of the travel agency that made the booking",
+      "company", "ID of the company/entity that made the booking or responsible for paying the booking. ID is presented instead of designation for anonymity reasons",
+      "days_in_waiting_list", "Number of days the booking was in the waiting list before it was confirmed to the customer",
+      "customer_type", "Type of booking, assuming one of four categories: Contract - when the booking has an allotment or other type of contract associated to it; Group – when the booking is associated to a group; Transient – when the booking is not part of a group or contract, and is not associated to other transient booking; Transient-party – when the booking is transient, but is associated to at least other transient booking",
+      "adr", "Average Daily Rate as defined by dividing the sum of all lodging transactions by the total number of staying nights",
+      "
+required_car_parking_spaces", "Number of car parking spaces required by the customer",
+      "total_of_special_requests", "Number of special requests made by the customer (e.g. twin bed or high floor)",
+      "reservation_status", "Reservation last status, assuming one of three categories: Canceled – booking was canceled by the customer; Check-Out – customer has checked in but already departed; No-Show – customer did not check-in and did inform the hotel of the reason why",
+      "reservation_status_date", "Date at which the last status was set. This variable can be used in conjunction with the ReservationStatus to understand when was the booking canceled or when did the customer checked-out of the hotel")
+
+infodf <- data.frame(ColumnName=info[seq(from=1,to=61, by=2)], Description=info[seq(from=2, to=62, by=2)], stringsAsFactors = FALSE)
+infodf %>% kable() %>% kable_styling(bootstrap_options = "striped")
+```
+
+
+
+```{r}
+# reducing features for model, also re-factoring
+model_data <- raw %>% 
+  subset(select = c(is_canceled, lead_time, adr, adults, children, babies, distribution_channel, is_repeated_guest, previous_cancellations, reserved_room_type, booking_changes, deposit_type, stays_in_weekend_nights, required_car_parking_spaces, stays_in_week_nights, customer_type, days_in_waiting_list, meal, total_of_special_requests, market_segment, arrival_date_month)) %>% 
+  drop_na() %>% # NA values will only hurt the model
+  mutate_if(is.character, as.factor) %>% # need to factor vars
+  mutate(
+    is_canceled = ifelse(is_canceled==1, "y", "n")
+  ) %>% 
+  mutate( #a few 0/1 cols need to be factored
+    is_canceled = factor(as.factor(is_canceled), levels = c("y", "n")),
+    is_repeated_guest = as.factor(is_repeated_guest),
+    previous_cancellations = as.factor(previous_cancellations)
+  )
+
+model_data %>% 
+  slice(1:10) %>% 
+  datatable()
+```
+
+Here is the head of the data that will we be using for the modeling. A few things to note:
+
+* This data has 119,386 total observations.
+* This data has been cleaned of any null values, there were only 4 rows that had a null value, so they were deleted from the data for modeling.
+* I have changed is_canceled to be 'y' or 'n' instead of the original '0' or '1'.
+* Excluding the is_canceled feature, there are 18 other features to be used for modeling.
+
+Features that were not removed:
+
+* hotel
+  + This feature tended to bring the accuracy of the model down, in testing, so it was removed from the modeling data.
+  
+* arrival_date_year
+  + This feature does not logically make sense, as the goal is to predict future bookings cancelation status.
+  
+* arrival_date_week_number
+  + This feature does not logically make sense, as it too specific about the booking timeframe,
+    - there could have been local events that could have effected the bookings, or other outside factors.
+    - this feature also tended to bring the accuracy down in testing.
+    
+* arrival_date_day_of_month
+  + For the same reasons above, this is too specific, yet also too broad of a feature revolved around dates.
+  
+* reservation_status
+  + This feature is a direct representation of whether a booking is canceled or retained, it was removed.
+  
+* reservation_status_date
+  + This will have no correlation to future bookings.
+
+# Analysis of the Data
+
+Lets start by doing a general analysis of the data as a whole, including all the features the Random Forest algorithm will be using.
+
+## Basic Statistics
+
+```{r}
+model_data %>% 
+  subset(select= c(lead_time, adr, adults, children, babies, booking_changes, stays_in_weekend_nights, required_car_parking_spaces, stays_in_week_nights, days_in_waiting_list, total_of_special_requests)) %>% 
+  summary()
+```
+
+Here is a summary of the continuous data for the modelling data, a few important notes from this are:
+
+* Lead Time:
+
+  + Has a min of 0, while a max of 737. Although the median lead time is 69. This suggests that 50% of customers have a lead time less than 69, and the other 50% have a lead time greater than 69.
+  
+* Average Daily Rate:
+
+  + It is unknown what currency this is calculated with.
+  + The mininum value is -6.38, meaning either a customer was paid to book or this is a clerical error.
+  + The max value is 5400 which is a starking difference from the mininum of -6.38.
+  + The median value is 94.59, showing that 50% of people that book will spend under 94.59, while the other 50% will spend more than that.
+  
+* Adults, Children, and Babies:
+
+  + Here we can see that the median for all but Adults is 0, showing that over 50% of customers do not book with babies or children.
+  + The 1st Quarter to 3rd Quarted for Adults is 2, this shows that at least 75% of the customers book with 2 Adults!
+  
+* A vast majority of customers will not spend time in a waiting list.
+
+* Roughly only 25% of customers will have a special request. 
+
+* Customers are more likely to book during weekdays, than weekends.
+
+## Distribution of Features
+
+```{r}
+print.ttDist(.md = model_data, var= "is_canceled")
+```
+
+Here the distribution of the model data is clearly shown, again, this data is just the raw data with removed features and removed NA values.
+
+There is a clear split between the prediction variable here, where ~63% of bookings were not canceled, leaving the other ~37% of bookings to be canceled.
+
+There also appears to be duplications in this dataset, more so for the canceled bookings. This is likely due to a high volume of samples, and high similarity between booking customers. These will be left in the modeling data.
+
+## Graphing of Features
+
+Lets start looking at some graphs!
+
+### Graph Set 1
+
+```{r}
+# plotting graph 1
+p1 <- model_data %>% 
+  group_by(is_canceled, distribution_channel) %>% 
+  summarise(
+    num = n()
+  ) %>% 
+  group_by(distribution_channel) %>%
+  mutate(
+    prop = num/sum(num)
+  ) %>% 
+  ggplot()+
+  geom_bar(aes(x=factor(distribution_channel,levels= rev(levels(distribution_channel))), y= prop, fill= is_canceled), stat= "identity")+
+  theme(
+  axis.text.x = element_blank(),
+  axis.ticks = element_blank())+
+  guides(fill=FALSE)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Distribution Channel")+
+  coord_flip()+
+  geom_hline(yintercept=0.6296, color = "black", size = 0.75)
+
+# plotting graph 2
+p2 <- model_data %>% 
+  group_by(is_canceled, reserved_room_type) %>% 
+  summarise(
+    num = n()
+  ) %>% 
+  group_by(reserved_room_type) %>%
+  mutate(
+    prop = num/sum(num)
+  ) %>% 
+  ggplot()+
+  geom_bar(aes(x=factor(reserved_room_type,levels= rev(levels(reserved_room_type))), y= prop, fill= is_canceled), stat= "identity")+ 
+  theme(
+  axis.text.x = element_blank(),
+  axis.ticks = element_blank())+
+  guides(fill=FALSE)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Room Type")+
+  coord_flip()+
+  geom_hline(yintercept=0.6296, color = "black", size= 0.75)
+
+# plotting graph 3
+p3 <- model_data %>% 
+  group_by(is_canceled, customer_type) %>% 
+  summarise(
+    num = n()
+  ) %>% 
+  group_by(customer_type) %>%
+  mutate(
+    prop = num/sum(num)
+  ) %>% 
+  ggplot()+
+  geom_bar(aes(x=factor(customer_type,levels= rev(levels(customer_type))), y= prop, fill= is_canceled), stat= "identity")+
+  theme(
+  axis.text.x = element_blank(),
+  axis.ticks = element_blank())+
+  ylab("")+
+  xlab("")+
+  ggtitle("Customer Type")+
+  coord_flip()+
+  theme(legend.position="bottom", legend.box = "horizontal",
+        legend.background = element_rect(fill="lightgrey",
+                                  size=0.5, linetype="solid", 
+                                  colour ="black"))+
+  geom_hline(yintercept=0.6296, color = "black", show.legend = TRUE, size=0.75)
+
+# releveling, plotting graph 4
+l.o <- c("Und", "SC", "FB", "HB", "BB")
+p4 <- model_data %>% 
+  group_by(is_canceled, meal) %>% 
+  summarise(
+    num = n()
+  ) %>% 
+  group_by(meal) %>%
+  mutate(
+    prop = num/sum(num)
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    meal = ifelse(meal == "Undefined", "Und", as.character(meal))
+  ) %>% 
+  ggplot()+
+  geom_bar(aes(x= factor(meal, levels= l.o), y= prop, fill= is_canceled), stat= "identity")+
+  theme(
+  axis.text.x = element_blank(),
+  axis.ticks = element_blank())+
+  guides(fill=FALSE)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Meal Type")+
+  coord_flip()+
+  geom_hline(yintercept=0.6296, color = "black", size= 0.75)
+
+
+## arrange plots
+p <- ggarrange(p2, p1, p4, p3, 
+          ncol=2,
+          nrow=2)
+
+p
+```
+
+The line in the graphs above represents the true split of customers that have not canceled (62.96%), in the modeling data.
+
+These graphs show the proportion of features for the room type and meal type, as well as the distribution channel and the customer type. There are a few things that stand out:
+
+* The room types all seem to hover around the true split of cancellations, however the room type "P" is always canceled.
+  + This could be due to an extremely low number of bookings for this room type.
+
+* Bookings made through Corporate, Direct, or GDS channels are typically kept, while TA/TO channels have roughly the usual proportion of cancelations.
+  + However, the Undefined distribution channel is never canceled, again this could be due to an extremely low number of bookings through an undefined channel.
+  
+* Meal types all hover around the expected cancelation proportion, except for the "FB" or Full-Board type. Bookings made that have designated a Full-Board meal are typically canceled.
+  + Also not that bookings with an Undefined meal type have the highest proportion of retained bookings.
+  
+* While Contract and Transient bookings hover around the estimated cancelation proportions, it is apparant that bookings made for groups are usually retained!
+  + This could be a good marketing avenue, targeting or pushing ads for group bookings to help retain bookings.
+  + The Transient-Party customer type also tends to retain their bookings significantly more than expected.
+
+### Graph Set 2
+
+```{r}
+## p1 and p2
+# market_segment, arrival_date_month
+# plotting graph 2
+p1 <- model_data %>% 
+  group_by(is_canceled, market_segment) %>% 
+  summarise(
+    num = n()
+  ) %>% 
+  group_by(market_segment) %>%
+  mutate(
+    prop = num/sum(num)
+  ) %>% 
+  ggplot()+
+  geom_bar(aes(x=market_segment, y= prop, fill= is_canceled), stat= "identity")+ 
+  theme(
+  axis.text.x = element_blank(),
+  axis.ticks = element_blank())+
+  guides(fill=FALSE)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Market Segment")+
+  coord_flip()+
+  geom_hline(yintercept=0.6296, color = "black", size= 0.75)
+  
+p2 <- model_data %>% 
+  group_by(is_canceled, arrival_date_month) %>% 
+  summarise(
+    num = n()
+  ) %>% 
+  group_by(arrival_date_month) %>%
+  mutate(
+    prop = num/sum(num)
+  ) %>% 
+  ggplot()+
+  geom_bar(aes(x=arrival_date_month, y= prop, fill= is_canceled), stat= "identity")+ 
+  theme(
+  axis.text.x = element_blank(),
+  axis.ticks = element_blank())+
+  guides(fill=FALSE)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Month of Arrival")+
+  coord_flip()+
+  geom_hline(yintercept=0.6296, color = "black", size= 0.75)
+
+# getting mu for plot 3
+## plotting plot 3
+mu<- model_data %>% 
+  subset(days_in_waiting_list> 0) %>% 
+  group_by(is_canceled) %>% 
+  summarise(
+    mean = mean(days_in_waiting_list)
+  )
+p3 <- model_data %>% 
+  subset(days_in_waiting_list> 0) %>% 
+  ggplot(aes(days_in_waiting_list, color= is_canceled, fill= is_canceled)) +
+  geom_density(alpha=0.6, show.legend = FALSE) + 
+  geom_vline(xintercept=mu$mean[2], color= "blue", size= 0.75)+ 
+  geom_vline(xintercept=mu$mean[1], color= "red", size= 0.75)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Days in Waiting List")
+
+
+p4 <- model_data %>% 
+  mutate(
+    is_repeated_guest = ifelse(is_repeated_guest==1, "yes", "no")
+  ) %>% 
+  group_by(is_canceled, is_repeated_guest) %>% 
+  summarise(
+    num = n()
+  ) %>% 
+  group_by(is_repeated_guest) %>%
+  mutate(
+    prop = num/sum(num)
+  ) %>% 
+  ggplot()+
+  geom_bar(aes(x=is_repeated_guest, y= prop, fill= is_canceled), stat= "identity")+
+  theme(
+  axis.text.x = element_blank(),
+  axis.ticks = element_blank())+
+  ylab("")+
+  xlab("")+
+  ggtitle("Repeated Guest")+
+  coord_flip()+
+  theme(legend.position="bottom", legend.box = "horizontal",
+        legend.background = element_rect(fill="lightgrey",
+                                  size=0.5, linetype="solid", 
+                                  colour ="black"))+
+  geom_hline(yintercept=0.6296, color = "black", show.legend = TRUE, size=0.75)
+
+
+## arrange plots
+p <- ggarrange(p2, p1, p3, p4,
+          ncol=2,
+          nrow=2)
+
+p
+```
+
+The black line represents the true split of is_canceled in the model data (62.96%). While the blue and red line in the graph of 'Days in Waiting List' respresents the respective means.
+    
+It is also important to note that outliers or the distributions were changed, in order to get better insights.  
+
+From these graphs there is a good amount of information we can extract:
+
+* The proportion of retained and canceled bookings seems to be relatively stable throughout the months.
+  + However January has the highest proportion of retained bookins,
+    - while June has the highest number of cancellations.
+    
+* The market segment of bookings has some  clear differences in the proportion of retained and canceled bookings.
+  + The Groups seems to be the only group far below the usualy 67% of reained bookings.
+  + The Direct, Corporate, Complementary, and Aviation bookings tend to have the highest amount of retained bookings.
+  + The TA/TO markets are right around the average proportion.
+
+* The number of days a customer spends in a waiting list generally has better effects.
+  + This graph was heavily modified, as shown before at least 75% of bookings spend 0 days in a waiting list, so this is looking at all number of days greater than 0 to get a better insight.
+  
+* It is clearly shown that if a booking was made by a repeated guest, they are much more likely to retain the current booking.
+  + However, if they are not a repeated guest the proportion of retained bookings is as expected.
+
+### Graph Set 3
+
+```{r}
+# getting mu for plot 1
+## plotting plot 1
+mu<- model_data %>% 
+  group_by(is_canceled) %>% 
+  summarise(
+    mean = mean(adr)
+  )
+p1 <- model_data %>% 
+  subset(adr >0 & adr < 320) %>% 
+  ggplot(aes(adr, color= is_canceled, fill= is_canceled)) +
+  geom_density(alpha=0.6, show.legend = FALSE) + 
+  geom_vline(xintercept=mu$mean[2], color= "blue", size= 0.75)+ 
+  geom_vline(xintercept=mu$mean[1], color= "red", size= 0.75)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Average Daily Rate")
+
+# getting mu for plot 2
+## plotting plot 2
+mu<- model_data %>% 
+  group_by(is_canceled) %>% 
+  summarise(
+    mean = mean(lead_time)
+  )
+p2 <- model_data %>% 
+  subset(lead_time< 500) %>% 
+  ggplot(aes(lead_time, color= is_canceled, fill= is_canceled)) +
+  geom_density(alpha=0.6, show.legend = FALSE) + 
+  geom_vline(xintercept=mu$mean[2], color= "blue", size= 0.75)+ 
+  geom_vline(xintercept=mu$mean[1], color= "red", size= 0.75)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Lead Time")
+
+p3 <- model_data %>%
+  subset(total_of_special_requests < 5) %>% 
+  ggplot(aes(total_of_special_requests, color= is_canceled, fill= is_canceled))+
+  geom_density(alpha=0.6, show.legend = FALSE)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Total # of Special Requests")
+
+p4 <- model_data %>%
+  subset(required_car_parking_spaces <= 3) %>% 
+  ggplot(aes(required_car_parking_spaces, color= is_canceled, fill= is_canceled))+
+  geom_density(alpha=0.6)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Total # of Cars")+
+  theme(legend.position="bottom", legend.box = "horizontal",
+        legend.background = element_rect(fill="lightgrey",
+                                  size=0.5, linetype="solid", 
+                                  colour ="black"))
+
+
+
+## arrange plots
+p <- ggarrange(p1, p2, p3, p4,
+          ncol=2,
+          nrow=2)
+
+p
+```
+
+The blue and red line in the above graphs respresent the respective means.
+
+* The Average Daily Rate is nearly identical between canceled bookings, and retained bookings.
+  + The extreme outliers were removed for this distribtuion, looking at ADRs' above 0, and below 500.
+
+* Lead times are typically lower for retained bookings, this could suggest that the sooner the booking, the more likely the customer is to retain that booking.
+  + The outliers were removed for this distribution, looking at the Lead Times less than 500 days.
+
+* Generally, bookings that require a special request are more likely to be retained, while if they do not require a special request, they are more likely to be canceled.
+  + Outliers of requests more than 4 were excluded.
+
+* The total numbers of cars dont really tend to lead towards any valuable information.
+  + Outliers with cars more than 3 were removed.
+
+### Graph Set 4 
+ 
+```{r}
+p1 <- model_data %>%
+  subset(stays_in_weekend_nights<=5) %>% 
+  ggplot(aes(stays_in_weekend_nights, color= is_canceled, fill= is_canceled))+
+  geom_density(alpha=0.6, show.legend = FALSE)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Total # of Weekend Nights")
+
+p2 <- model_data %>%
+  subset(stays_in_week_nights<=11) %>% 
+  ggplot(aes(stays_in_week_nights, color= is_canceled, fill= is_canceled))+
+  geom_density(alpha=0.6, show.legend = FALSE)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Total # of Week Nights")
+
+p3 <- model_data %>%
+  subset(booking_changes < 5) %>% 
+  ggplot(aes(booking_changes, color= is_canceled, fill= is_canceled))+
+  geom_density(alpha=0.6)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Total # of Booking Changes")+
+  theme(legend.position="bottom", legend.box = "horizontal",
+        legend.background = element_rect(fill="lightgrey",
+                                  size=0.5, linetype="solid", 
+                                  colour ="black"))
+
+
+# getting plot 4
+p4 <- model_data %>% 
+  mutate(
+    tp = adults + children + babies
+  ) %>% 
+  subset(tp < 6) %>% 
+  ggplot(aes(tp, color= is_canceled, fill= is_canceled))+
+  geom_density(alpha=0.6, show.legend = FALSE)+
+  ylab("")+
+  xlab("")+
+  ggtitle("Total Party")
+
+## arrange plots
+p <- ggarrange(p2, p1, p4, p3,
+          ncol=2,
+          nrow=2)
+
+p
+```
+
+We can notice that generally customers that booked on the weekends did not cancel their bookings. It is also apparent that bookings made with only two week nights were more often canceled than retained.
+
+* This could suggest that it would be better to market towards weekend bookings, or bookings for more than 2 days, or bookings made for 1 day.
+
+* The total number of party members has little effect on cancellations,
+  + however, bookings made for 1 party member are less likely to be canceled, while parties of 2 are more likely to be canceled.
+  + Outliers of parties greater than 5 were removed.
+  
+* If a booking is changed, there is a much higher chance that the booking will be retained, while if there are no changes, there seems to be more cancelations.
+  + Outliers of bookings greater than 4 were removed.
+
+# Modeling
+
+The purpose of these models will be to get effective insight into the following:
+
+* If new bookings are likely to be canceled or retained.
+  + This insight can be used for Market Targeting
+  
+* Get insight into how changing the threshold, of the predictions, will effect the False Negative Rate, as well as the True Positive Rate.
+  + These two metrics can give an inclination into what the trade-off is between having a wider net to market, versus having a more narrow net.
+    - ie, spending more money to target the bookings that are the most likely to retain their booking, or spending less money while sacraficing more potential loss from un-marketed retained bookings.
+
+## The Math behind the metrics
+
+The False Negative Rate (FNR) is defined as:
+
+* $FNR=\frac{FN}{FN+TN}=1-Specificity$
+
+  + ie, the False Negative divided by the sum of the False Negatives and the True Negatives.
+  + FNR describes the error of the negative cases, thus we want this value to approach 0.
+
+The True Posistive Rate (TPR) is defined as:
+
+* $TPR=\frac{TP}{FP+TP}=Precision$
+  + ie, the True Positive divided by the sum of the False Positive and the True Positives.
+  + TPR describes the proportion of samples correctly classified as positive, thus we want this value to approach 1.
+
+The FNR and TPR will be used to evaluate the general preformance of the classifications. In general, the goal is to have a FNR close to 0, while maintaining a high value of TPR.
+
+Receiver Operating Characteristics (ROC) is defined as:
+
+  * A comparison of the True Positive Rate and the False Positive Rate.
+    + the ROC at a given point is:
+      - $ROC=\frac{TPR}{FPR}=\frac{\frac{TP}{TP+FN}}{\frac{FP}{FP+TN}}$
+      - The goal is to have a ROC close to 1, as this suggests the model is getting a balanced split.
+      
+  * The ROC can help guide where the best threshold split might be.
+  
+The Area Under the Curve (AUC) can also be a useful metric, this is defined as:
+  
+  * The Area Under the Curve of the ROC.
+    + $AUC=\int\limits_{x=0}^{1}TPR(FPR^{-1}(x))dx$
+      - ie, the integral of the $ROC(x)\epsilon D,~s.t. ~D=0\le x\le 1$
+  * This provides and aggregated measure of preformance across all thresholds.
+    + ie, a general idea as to the overall potential accuracy of a model.
+    
+The mtry Value corrosponds to the number of possible drawn variables for each split.
+
+  * Typically with highly correlated data features, the mtry value should be low.
+    + However, as the features shown above have very little correlation to a booking being canceled.
+  * This means the mtry value should end up at a higher number for modeling this data.
+
+## Quick Notes
+
+For Reference:
+  
+* model_data is the raw data, but with chosen features and NA values removed.
+    + This will be the basis of the Second, Third, and Fourth models.
+* base data is the model_data, but with duplicates removed.
+    + This is will be the bases for only the Base Model.
+* train data is the given data used to train the Random Forest model.
+* test data is the given data used to test the current Random Forest model.
+  
+Again, the general goal is to find a happy medium between a low FNR, and a high TPR, while keeping the overall accuracy roughly the same.
+
+## The Base Model
+
+The first thing I want to do is take the base modeling data and put it through the Random Forest Algorithm. This will help decide how many trees we should run, what features to run, and give a general idea of what to expect from this dataset.
+
+### Base Model || Data Distribution
+
+```{r}
+base <- model_data[sample(nrow(model_data)),]
+
+base <- model_data %>% 
+  distinct()
+
+# getting train and test data
+train <- base %>% 
+  tt.split(percent = 0.8)
+
+test <- base %>% 
+  tt.split(train, dups=FALSE)
+
+# checking distribution of data
+print.ttDist(train, test, "is_canceled", base)
+```
+
+With typical models you do not want duplicates in the training data or the testing data, as this can lead to overfitting or lopsided weighting of Type 1 and Type 2 errors.
+
+However because of the nature of the problem at hand, many bookings are going to be very similar to each other, and bookings might have the exact same features but also have different outcomes. In other words, two bookings that are exactly the same can just as easily be canceled, as it can be retained. This is why the final model will be ran using duplicates in the data.
+
+For this first Base Model, the duplicates will be left out of the model, this will serve as a purpose to test how sensitive the model is to having duplicates in the training and testing data.
+
+### Base Model || Random Forest Call
+
+This first model will be created with 501 trees. Typically an odd number of trees is used to break ties, as this current model will look for a majority vote of a 50% threshold.
+
+```{r}
+# calling and getting random forest model
+rf <- randomForest(is_canceled ~ ., data = train,
+                   importance = TRUE,
+                   ntree = 501)
+
+print(rf)
+```
+
+From the above summary we can gather some good information:
+
+* The Out of Bag error rate is 19.87%
+  + ie, the accuracy is 0.8013.
+  + This means that the data the model validated itself on had a general accuracy of 78.7%.
+  
+* The False Negative rate is very high.
+  + $FNR=\frac{9431}{9431+43972}\approx0.1766$
+    - ie, the algorithm incorrectly guessed 17.6% of the bookings that did not cancel.
+  + Also to note, out of the 18,942 samples the algorithm classified as being canceled, close to half of those were wrong!
+
+* The TPR is also very high.
+  + $TPR=\frac{9511}{9511+3830}\approx0.71292$
+    - ie, the model correctly guessed 71.3% of bookings that did cancel.
+
+A lower False Negative Rate is the ideal goal, in this model there were a total of 9,431 retained bookings that would have been missed due to misclassification! This could translate into less profits.
+
+### Base Model || Confusion Matrix
+
+Lets run the testing data from before through this current model.
+
+```{r}
+# getting predictions for test data
+test$pred <- predict(rf, newdata = test)
+
+# taking a look at the confusion matrix
+confusionMatrix(test$pred, test$is_canceled)
+```
+
+To note:
+
+  * The accuracy of the model, ran with this training data, is 0.8043,
+    + which is better than the Out of Bag estimate from the model!
+  * The FNR is:
+    + $FNR=\frac{947}{947+11064}\approx0.07884$
+    + This is much better than the OOB estimate!
+  * The TPR is:
+    + $TPR=\frac{2356}{2356+2318}\approx0.50407$
+    
+While this model seems to be preforming better with the testing data, as far as a lower FNR goes, the TPR also dropped much more than the initial findings! This could be indicitive of overfitting the model, meaning the algorithm is using too many trees.
+
+### Base Model || Hyperparameter Analysis
+
+Lets take a look at the error graph to see if there is a more optimal number of trees.
+
+```{r}
+plot(rf, main="Base Model, 80% Train w/ no Duplicates")
+abline(v=51,col="black")
+rf.legend <- if (is.null(rf$test$err.rate)){
+  colnames(rf$err.rate)
+  }else {colnames(rf$test$err.rate)}
+
+legend("top", cex =0.5, legend=rf.legend, lty=c(1,2,3), col=c(1,2,3), horiz=T)
+```
+
+This graph shows a clear indication of what is happening with the tree size and the model. The goal is to choose a number of trees that is roughly right before the curves start to even out. This model was ran with 501 trees, which is shown at the far right of the graph, where the error rates are already stabilized.
+
+The next model will be ran with 51 trees. This was partially done through pre-testing, however it can be seen that it lines up nicely with the graph above, the vertical line in the graph above is the point where 51 trees land on the graph.
+
+Next lets take a look into the features of the model.
+
+### Base Model || Feature Importance
+
+```{r}
+# explains feature impact on model
+varImpPlot(rf,
+           main = "Variable Importance for Base Model")
+
+# actual values of importance
+#importance(rf)
+```
+
+This charts explains two things, the Mean Decrease Accuracy, and the Mean Decrease Gini.
+
+The Mean Decrease Accuracy describes the suitability of a variable being a parent node, or the main predictor. This means that the higher the Mean Decrease Accuracy, the more likely it is to be a parent node in a given Random Forest Tree.
+
+The Mean Decrease Gini describes the purity of a variable, these variables tend to be a child node to a given tree in the Random Forest model. This means the higher the Mean Decrease Gini, the more likely this node is to be used after the Parent node.
+
+Both of these metrics combined can give insight into how the variables, are effecting the models ability to correctly classify the predictor.
+
+For example, the total_of_special_requests, lead_time, required_car_parking_spaces, and the previous_cancellations are the four most likely features to be the first split in a tree. While, lead_time and adr are the most likely variables to be used as a child node.
+
+Conversley, the number of babies is almost never the first split in a given tree, while the number of days in the waiting list, number of babies, or the repeated guests are almost never child nodes in a given tree.
+
+```{r}
+# number of occurances for each variable
+used = varUsed(rf)
+
+used.df <- model_data %>% 
+  lapply(function(x){
+    return (NA)
+  })
+
+used.df <- data.frame("feature"= names(used.df), "value"=NA)
+
+for (i in 2:nrow(used.df)){
+  used.df[i,2] = used[i-1]
+}
+
+
+used.df %>% 
+  arrange(-value) %>% 
+  hchart("bar", hcaes(feature, value)) %>% 
+  hc_title(text= "Number of times the variable was split") %>% 
+  hc_xAxis(title= list(text= "")) %>% 
+  hc_yAxis(title = list(text = "Total Number of Splits"))
+```
+
+This graph shows the number of times a given feature was split, for all trees. As shown, adr and lead time have the highest frequency of splits utilized by the Random Forest Model. This could be due to these two variables being the only true continuous variables. Conversley, it can be notes that the deposit_type was, comparitavely, almost never split. This could mean that it has the least correlation to the prediction of a booking being canceled or retained.
+
+
+Random Forest does a good job of not utilizing features, unless the algorithm feels that it will add value to the tree. Given this, I believe all the current features are fine to use for future modeling.
+
+## The Second Model
+
+With this new information, lets take a look into what happens when we start changing how the data is modeled, in an attempt for better results.
+
+### Model Two || Data Distribution
+
+```{r}
+m.d <- model_data[sample(nrow(model_data)),]
+
+m.d <- model_data
+
+# getting train and test data
+train <- m.d %>% 
+  tt.split(percent = 0.6)
+
+test <- m.d %>% 
+  tt.split(train, dups=TRUE)
+
+# checking distribution of data
+print.ttDist(train, test, "is_canceled", model_data)
+```
+
+Here I took the original modeling data, again this is the raw data with dropped features and dropped NA values. There are a few new things to note about this data:
+
+  * This data will be a modest 60% Training amd 40% Testing Split.
+    + The lower training data will be as a guide to test how sensitive the model is to a lower amount of training data, and a higher amount of testing data.
+  * As shown, there are also duplicates in this training data, as well as minimal duplicates in the testing data
+  * There are still no duplicates between the Training and Testing data.
+    + This is important, as we want to know how the model will run with a brand new data points.
+
+As for the Algorithm, it will also be ran with a few different hyperparameters:
+
+* A 5 Fold Cross Validation will be implemented, to make up for the lower number of Training Samples.
+  + This will mean that the algorithm will trained with five sets of 14,326 samples. Then it will take the average of these 5 sets to make a decision.
+    - This is good because it enables the algorithm to self validate itself.
+    - This can also be bad because it lowers the varience of unknown errors, which is an important factor when there are many unknowns playing into a decision.
+    
+* A threshold of 0.63 will be set.
+  + This means that it will take a majority vote of 63% of the trees to be classified as yes.
+    - This pushed the model to say that a booking will cancel less often, which should help keep the False Negative Rate and the True Positive Rate Lower.
+
+Lets run the Algorithm
+
+### Second Model || Random Forest Call
+
+```{r}
+# cross validation declaration
+ctrl <- trainControl(method="cv",
+                     number = 5,
+                     summaryFunction=twoClassSummary,
+                     classProbs=TRUE,
+                     savePredictions = "final"
+                     #summaryFunction = fourStats
+                     )
+
+# training model
+rf <- train(is_canceled ~ .,
+               data=train,
+               method="rf",
+               metric= "ROC",
+               maximize= TRUE,
+               ntree = 51,
+               cutoff = c(.63, .37),
+               trControl=ctrl)
+
+print(rf)
+```
+
+This summary output is a bit different than the previous, this is because we had to switch to using a different function from the "caret" package, as this will allow the implementation of Cross Validation.
+
+This Algorithm was actually set to use the ROC parameter as a basis of preformance, as well as an attempt to choose a mtry value based off the optimal ROC.
+    
+It is shown that the best mtry value was 33, as the ROC had the highest value at this hyperparameter, landing at a ROC of 0.9119, which is very high!
+
+### Second Model || Confusion Matrix
+
+```{r}
+# getting predictions for test data
+test$pred <- predict(rf, newdata = test)
+
+# taking a look at the confusion matrix
+confusionMatrix(test$pred, test$is_canceled)
+```
+
+Above shows the Confusion Matrix for the Second Model, as shown:
+
+* The general accuracy of the model is 0.7846,
+  + this is a drop in accuracy of 0.0197,
+    - something that is expected, as we are attempting to skew the errors.
+  
+* The False Negative Rate is:
+  + $FNR=\frac{1198}{1198+21636}\approx0.05247$
+  + Which is a drop of 0.02637, from the Base Model,
+    - this is a good sign, it means the error of classifying a booking as canceled is decreasing!
+    
+* The True Positive Rate is:
+  + $TPR=\frac{3214}{3214+5625}\approx0.36362$
+  + Which is a drop of 0.14045, from the Base Model
+    - this is a steeper drop than the FNR
+  
+Overall a drop in accuracy of approximately 1.97%, however a loss of 0.0256 in the FNR. This is great as it means the models False Negative Rate is approaching 0! 
+
+## Third Model
+
+For the Third Model, I will implement an aggressive split of the data. It will be the same modeling data, ie, the raw data set with dropped features and NA values. However, the samples will be split into 90% training and 10% testing
+
+### Third Model || Data Distribution
+
+For the split of training and testing data, I will implement a more aggressive approach. The train data will be 90% of the modeling data, while the test data will only be 10% of the modeling data.
+
+```{r}
+m.d <- model_data[sample(nrow(model_data)),]
+
+m.d <- model_data
+
+# getting train and test data
+train <- m.d %>% 
+  tt.split(percent = 0.9)
+
+test <- m.d %>% 
+  tt.split(train, dups=TRUE)
+
+# checking distribution of data
+print.ttDist(train, test, "is_canceled", model_data)
+```
+
+As we can see, it is roughly the same distribution from before, however, the samples for the training data is much higher, and the samples for the testing data is conversely, much lower.
+
+This will also serve as a purpose to see how the sensitivity of the model to more training data as a whole.
+
+### Third Model || Random Forest Call
+
+For this Third Model the Folds for the Cross Validation technique will stay at 5, however the threshold will be adjusted to 0.8. This means that the model will classify a booking as being canceled if an 80% majority is reached, otherwise it will be classified as not canceled.
+
+This will be done to get an idea of an extreme threshold, to get a basis of where the final thershold should be.
+
+```{r}
+# cross validation declaration
+ctrl <- trainControl(method="cv",
+                     number = 5,
+                     summaryFunction=twoClassSummary,
+                     classProbs=TRUE,
+                     savePredictions = "final"
+                     )
+
+# training model
+rf <- train(is_canceled ~ .,
+               data=train,
+               method="rf",
+               metric= "ROC",
+               maximize= TRUE,
+               ntree = 51,
+               cutoff = c(.8, .2),
+               trControl=ctrl)
+
+print(rf)
+```
+
+Again, the best chosen mtry value is 33, with a ROC of 0.92109. Which is the highest ROC out of all the models, however, lets check to more specific statistics.
+
+### Third Model || Confusion Matrix 
+
+Lets take the testing data, and run it through the model and take a look at the confusion matrix.
+
+```{r}
+# getting predictions for test data
+test$pred <- predict(rf, newdata = test)
+
+# taking a look at the confusion matrix
+confusionMatrix(test$pred, test$is_canceled)
+```
+
+Above shows the Confusion Matrix for the Second Model, as shown:
+
+* The general accuracy of the model is 0.7683,
+  + this is a drop in accuracy of 0.036, from the Base Model,
+    - something that is expected, as we are attempting to skew the errors.
+  
+* The False Negative Rate is:
+  + $FNR=\frac{89}{89+5379}\approx0.01628$
+  + Which is a drop of 0.06256, from the Base Model,
+    - this is a good sign, it means the error of classifying a booking as canceled is decreasing!
+    
+* The True Positive Rate is:
+  + $TPR=\frac{414}{414+1658}\approx0.19981$
+  + Which is a drop of 0.30426, from the Base Model,
+    - this is a much steeper drop than the FNR
+  
+Overall a drop in accuracy of approximately 3.6%, however a loss of 0.06256 in the FNR. This is great as it means the models False Negative Rate is approaching 0, however there is a big loss in the True Positive Rate, meaning the model is underestimating the number of canceled booking. This could translate to more money wasted, for little gain.
+
+## Fourth Model
+
+This model will be a more aggressive approach to the second model. The goal is to refine the objective of this problem, to minimize the False Negative Rate, while keeping a generally high accuracy.
+
+### Fourth Model || Data Distribtuion
+
+For this Fourth Model, the split of training and testing data will be the normal the typical 80% training and 20% testing.
+
+```{r}
+m.d <- model_data[sample(nrow(model_data)),]
+
+m.d <- model_data
+
+# getting train and test data
+train <- m.d %>% 
+  tt.split(percent = 0.8)
+
+test <- m.d %>% 
+  tt.split(train, dups=TRUE)
+
+# checking distribution of data
+print.ttDist(train, test, "is_canceled", model_data)
+```
+
+As shown, there are duplicates in the training data, as well as the testing data. This is due to the nature of the problem at hand. One thing to note is that there are no duplicated between the two data sets. This means that every sample that gets ran through the confusion matrix, will be a sample not seen by the initial algorithm.
+
+### Fourth Model || Random Forest Call
+
+As the previous threshold showed an extreme case, the idea goal is to find a happy medium. For this, 
+
+The model will also be ran with a 5 Fold Cross Validation, this is to directly see the impact of the new threshold.
+
+```{r}
+# cross validation declaration
+ctrl <- trainControl(method="cv",
+                     number = 5,
+                     summaryFunction=twoClassSummary,
+                     classProbs=TRUE,
+                     savePredictions = "final"
+                     )
+
+# training model
+rf <- train(is_canceled ~ .,
+               data=train,
+               method="rf",
+               metric= "ROC",
+               maximize= TRUE,
+               ntree = 51,
+               cutoff = c(.7, .3),
+               trControl=ctrl)
+
+print(rf)
+```
+
+Again, we see the optimal mtry value being 33, with a ROC of 0.91772. Showing a decrease of only 0.00583 from the Second Model!
+
+This suggests that the overall accuracy should be roughly the same!
+
+### Fourth Model || Confusion Matrix
+
+Lets take a look at the Confusion Matrix.
+
+```{r}
+# getting predictions for test data
+test$pred <- predict(rf, newdata = test)
+
+# taking a look at the confusion matrix
+confusionMatrix(test$pred, test$is_canceled)
+```
+
+Above shows the Confusion Matrix for the Fourth Model, as shown:
+
+* The general accuracy of the model is 0.7828,
+  + this is a drop in accuracy of 0.0215, from the Base Model,
+  + however, only a drop of 0.0018 from the Second Model!
+    - This is something that is expected, as we are attempting to skew the errors.
+  
+* The False Negative Rate is:
+  + $FNR=\frac{407}{407+10633}\approx0.03687$
+  + Which is a drop of 0.04197, from the Base Model,
+  + however, a drop of 0.0156 from the Second Model!
+    - This is a good sign, it means the error of classifying a booking as canceled is decreasing!
+    
+* The True Positive Rate is:
+  + $TPR=\frac{1293}{1293+2903}\approx0.30815$
+  + Which is a drop of 0.19592, from the Base Model.
+
+this tells us that to get a decrease of 4.2%, for the number of incorrectly classified canceled bookings, we lost an overall accuracy of correctly classifying the canceled bookings by 19.6%.
+
+  * ie, to reduce the number of bookings that are incorrectly classified as being canceled, we gained a much bigger error of incorrectly classifying a booking as not canceled.
+  * This could translate to spending more money on advertising to target the correct bookings, with the downfall of wasting money on bookings that are incorrectly classified.
+
+# Checking the Final Model
+
+As I believe the Fourth model is the most well rounded model for the problem at hand, I will do some final graphs to check the overall preformance of the model.
+
+## Basic Model Evaluation Graphs
+
+```{r}
+## run MLeval
+
+res <- evalm(rf,
+             positive = "y",
+             showplots = FALSE)
+
+## get ROC
+res$roc
+```
+
+This is the ROC Curve of the Fourth Model. This shows the relation of the True Positive Rate and the Flase Positive Rate.
+
+* $TPR=\frac{TP}{TP+FP}$
+
+* $FPR=\frac{FP}{TP+FP}$
+
+* The shape of the curve is normal,
+  +this shows that no matter where the threshold is, you will get proportionate values for the True Positive Rate and the False Positive Rate.
+
+* It can be seen that the True Positive Rate never truly reaches 1.0,
+  + this will typically mean that no matter the threshold chosen, there will always be some misclassification of the Positive Cases.
+
+* The AUC is 0.92, this suggests that there is a 92% chance the model will be able to distinguish between a positive class, and a negative class!
+
+```{r}
+# precision and recall
+res$proc
+```
+
+This graph shows the relation of the Precision, as it relates to the Sensitivity.
+
+* $Precision=\frac{TP}{TP+FP}=TPR$
+
+* $Sensitivity=\frac{TP}{TP+FN}$
+
+It can be seen that the Precision stops at 0.375, this would suggest that if the sensitivity is tuned to be 100% accurate, the Precision would only get as low as 0.375.
+
+
+```{r}
+## get precision recall gain curve
+res$prg
+```
+
+This graph describes the relation between Precision and Recall (Sensitivity).
+
+We see that it is a negative slope of roughly 1. This means that tuning the model towards a better Precision will result in the exact 1:1 change in the Sensitivity.
+
+This is a good thing, as it means the model is not heavy towards one side, or the other.
+
+```{r}
+## get calibration curve
+res$cc
+```
+
+The above graph is the Calibration Curve, this gives insight into the reliability of the model.
+
+As the models curve is very close to the middle line that has a slope of 1, this suggests that the overall reliability of the Fourth Model is very good! In other words, the Predicted Probability has a relationship very close to 1:1 to the True Probability.
+
+## 3D Plot of Final Model
+
+The last thing I want to check is to see if there are any apparent clusters in the relation of the top two continious features, Average Daily Rate and Lead Time, regarding the Classification from the model.
+
+```{r}
+# plotting 3d graph
+test <- test %>% 
+  mutate(
+    error = ifelse(is_canceled == pred, ifelse(is_canceled=='y',"TP","TN"),ifelse(is_canceled=='y',"FP","FN"))
+  ) %>% 
+  mutate(
+    error = factor(error, levels=c("TP", "TN", "FP", "FN"))
+  )
+
+temp <- data.frame("adr"=test$adr, "lead_time"=test$lead_time, z=test$is_canceled, "error"=test$error) 
+
+temp %>% 
+  plot_ly(x=~adr, y=~lead_time, z=~error, color=~error, colors=c("green", "darkgreen", "red", "darkred")) %>% 
+  add_markers()%>% 
+  layout(scene = list(xaxis = list(title = 'Average Daily Rate'),
+                     yaxis = list(title = 'Lead Time'),
+                     zaxis = list(title = 'Classification')))
+
+```
+
+This graph accurately describes the difficulty of the problem at hand. The graph shows the relation of the Average Daily Rate compared to the Lead Time, categorized by the true classification from the confusion matrix.
+
+It can be observed that all four clusters of FN, FP, TN, TP, (all four areas of the confusiom matrix) all happen to lay over eachother. It can be noticed that as both the Average Daily Rate and the Lead time approach 0, the model tends to classify the booking as either TN or FN. This highly suggests that the lower the Average Daily Rate is, and if the Lead Time is close to 0, the booking is likely to be retained.
+
+This can also likely be due to the sheer volume of bookings that have 0 in both these features. However, it can be noticed that the True Positive cases typically occur farthest from 0, while this could be an inclination, the False Positive cases also include values close to 0, this suggests that booking retention has a lot of random tendencies, which make it difficult to accurately model.
+
+# Conclusion
+
+In conclusion, we can gather that while booking cancelations are seemingly random, they can be classified into potential cancelations or retention.
+
+## Modeling
+
+Out of the four total models, we can gather that it is better to leave duplicates in the training data, as there are likely to be a lot of similar booking patterns in the real world. We can also estimate that the confidence interval of the accuracy will only differ by 0.02 from the mean accuracy. As the base model was found to be overfitting the data, we can conclude that the second, third, and fourth models would be best to use for classifying a booking cancelation. Out of those three models the following statistics were gathered:
+
+* Model Two
+  + Data: 60% train, 40% test
+  + Threshold: 0.63
+  + mtry: 33
+  + ntree: 51
+  + Accuracy: 0.7846
+    - CI (95%): (0.78, 0.7891)
+  + False Negative Rate: 0.05247
+  + True Positive Rate: 0.36362
+  + ROC: 0.91189
+
+* Model Three
+  + Data: 90% train, 10% test
+  + Threshold: 0.8
+  + mtry: 33
+  + ntree: 51
+  + Accuracy: 0.7683
+    - CI (95%): (0.7586, 0.7778)
+  + False Negative Rate: 0.01623
+  + True Positive Rate: 0.19981
+  + ROC: 0.92109
+  
+* Model Four
+  + Data: 80% train, 20% test
+  + Threshold: 0.7
+  + mtry: 33
+  + ntree: 51
+  + Accuracy: 0.7878
+    - CI (95%): (0.7736, 0.7867)
+  + False Negative Rate: 0.03687
+  + True Positive Rate: 0.30815
+  + ROC: 0.91513
+  
+In my opinion, I believe Model Four to have the most balanced False Negative Rate and True Positive Rate for the problem at hand, giving a good balance between a low proportion of 'missed opportunities' from misclassifying a predicted canceled booking. As well as a relatively high proportion of bookings that were correctly classified as canceled. However, as shown these metrics can easily be changed to fit a companies needs.
+
+This model could also be easily modified to fit similar types of problems, for example, if we were wanting to classify a booking as potentially being canceled or retained, off of data from a customer search on a booking website. The only changes needed to be made would be feature selection, in the example it wouldn't make sense to include things like: the number of special requests made, or the days in spent in a waiting list, possibly not even meals. However things like the average daily rate could still be estimated, as well as the lead time.
+
+## Analysis
+
+In general, we found that customers are more likely to cancel a booking when they have the following features:
+
+* Reserved a booking with a full-board meal.
+* Reserved a booking from the groups market segment.
+* Have no special requests.
+
+However, customers are more likely to retain a booking when they:
+
+* Have a low amount of lead time.
+* Are a repeat guest.
+* Come from the following market segment:
+  + Direct
+  + Corporate
+  + Complementary
+  + Aviation
+* Are classified as a group customer type.
+
+These statistics can be useful for marketing towards customers, to increase booking retention, or they can be used to help a company focus on areas of improvement.
