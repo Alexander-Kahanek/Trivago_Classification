@@ -1,6 +1,6 @@
 # Hotel Booking Classification
 
-This project is a __team based *Exploratory Data Analysis*__, it is __focused on *finding patterns in accidents* across texas__, focusing on __*weekend* traffic vs. *weekday* traffic__, as well as creating an __*interactive map* to help visualize traffic accident patterns__.
+This project uses hotel booking data from Trivago, the project is focused on doing a small analysis on the data, as well as creating multiple models with Random Forest to predict whether a booking will potentially be canceled or retained. This is done to gain better insight into bookings, as well as to gain a market advantage through the potential use of targeted advertising with the help of the modeling.
 
 # Files and Folders
 
