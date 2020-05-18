@@ -7,3 +7,5 @@ This project is a __team based *Exploratory Data Analysis*__, it is __focused on
 * The hotel.html is the final output for the project, [it can be viewed here...](https://alexander-kahanek.github.io/project/hotel.html)
 
 * The hotel.rmd file is where the code and output is written
+
+* The hotel_bookings.csv file is 
